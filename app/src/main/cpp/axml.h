@@ -10,6 +10,7 @@ namespace axml {
 
 constexpr uint16_t kXml = 0x0003, kPool = 0x0001, kResMap = 0x0180, kStartEl = 0x0102;
 constexpr uint32_t kResMin = 0x0101020c, kResTarget = 0x01010270, kResSplitReq = 0x01010591;
+constexpr uint32_t kResVerCode = 0x0101021b, kResVerName = 0x0101021c;
 constexpr uint8_t kTypeInt = 0x10, kTypeHex = 0x11, kTypeBool = 0x12;
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 
@@ -18,7 +19,8 @@ template <class T> inline void wr(uint8_t* p, T v) { std::memcpy(p, &v, sizeof(T
 
 struct Info {
     std::string pkg;
-    int minSdk = -1, targetSdk = -1, splitReq = -1;
+    int minSdk = -1, targetSdk = -1, splitReq = -1, versionCode = -1, perms = 0;
+    std::string versionName;
 };
 
 inline void readPool(const uint8_t* d, size_t off, size_t sz, std::vector<std::string>& out) {
@@ -90,6 +92,7 @@ inline bool process(uint8_t* d, size_t n, int newMin, int newTarget, bool clearS
             uint16_t aStart = rd<uint16_t>(c + 24), aSize = rd<uint16_t>(c + 26), aCnt = rd<uint16_t>(c + 28);
             const std::string& el = str(nameIdx);
             const bool isManifest = el == "manifest", isSdk = el == "uses-sdk";
+            if (el == "uses-permission" || el == "uses-permission-sdk-23") info.perms++;
             if (aSize >= 20) {
                 for (uint16_t i = 0; i < aCnt; i++) {
                     size_t ao = 16 + (size_t)aStart + (size_t)i * aSize;
@@ -102,6 +105,9 @@ inline bool process(uint8_t* d, size_t n, int newMin, int newTarget, bool clearS
                     const bool isInt = dt == kTypeInt || dt == kTypeHex;
 
                     if (isManifest && nm == "package" && info.pkg.empty() && raw != kNone) info.pkg = str(raw);
+                    if (isManifest && isInt && (id == kResVerCode || (id == 0 && nm == "versionCode"))) info.versionCode = (int)data;
+                    if (isManifest && (id == kResVerName || (id == 0 && nm == "versionName")))
+                        info.versionName = str(raw != kNone ? raw : data);
                     if (isSdk && isInt && (id == kResMin || (id == 0 && nm == "minSdkVersion"))) {
                         info.minSdk = (int)data;
                         if (newMin >= 0 && (int)data != newMin) setInt(a, newMin);

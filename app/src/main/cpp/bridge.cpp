@@ -20,7 +20,8 @@ JNIEXPORT jstring JNICALL Java_com_fadil_apkfixer_Native_inspect(JNIEnv* env, jo
     axml::Info info;
     if (!axml::process(buf.data(), buf.size(), -1, -1, false, info)) return env->NewStringUTF("");
     std::string r = info.pkg + "\t" + std::to_string(info.minSdk) + "\t" +
-                    std::to_string(info.targetSdk) + "\t" + std::to_string(info.splitReq);
+                    std::to_string(info.targetSdk) + "\t" + std::to_string(info.splitReq) + "\t" +
+                    std::to_string(info.versionCode) + "\t" + info.versionName + "\t" + std::to_string(info.perms);
     return env->NewStringUTF(r.c_str());
 }
 

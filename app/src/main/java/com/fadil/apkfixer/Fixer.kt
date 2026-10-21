@@ -3,6 +3,7 @@ package com.fadil.apkfixer
 import android.content.Context
 import android.os.Build
 import com.android.apksig.ApkSigner
+import com.android.apksig.ApkVerifier
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -18,21 +19,42 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
-data class Opts(val lowerMin: Boolean, val lowerTarget: Boolean)
+data class Opts(
+    val lowerMin: Boolean,
+    val lowerTarget: Boolean,
+    val stripAbi: Boolean,
+    val dropSplits: Boolean
+)
 
 class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
     private val sdk = Build.VERSION.SDK_INT
+    private val deviceAbis: Set<String> = Build.SUPPORTED_ABIS.toSet()
+    private val deviceAbisNorm: Set<String> = deviceAbis.map { it.replace('-', '_') }.toSet()
+    private val knownAbis = setOf("arm64_v8a", "armeabi_v7a", "armeabi", "x86", "x86_64", "mips", "mips64", "riscv64")
+    private val splitRe = Regex("""(?:split_)?config\.([a-z0-9_]+)\.apk""", RegexOption.IGNORE_CASE)
+
+    /** Paket aplikasi utama dari fix() terakhir (untuk tombol uninstall). */
+    var lastPkg: String = ""
+        private set
 
     private fun workDir(): File = File(ctx.cacheDir, "work").apply { deleteRecursively(); mkdirs() }
 
     /** APK polos -> dirinya sendiri; XAPK/APKS/APKM -> semua .apk di dalamnya diekstrak. */
-    private fun listApks(input: File, work: File): List<File> {
+    private fun listApks(input: File, work: File, dropSplits: Boolean): List<File> {
         ZipFile(input).use { z ->
             if (z.getEntry("AndroidManifest.xml") != null) return listOf(input)
             val out = ArrayList<File>()
             for (e in z.entries()) {
                 if (e.isDirectory || !e.name.endsWith(".apk", true)) continue
-                val f = File(work, "in_${out.size}_" + File(e.name).name)
+                val fname = File(e.name).name
+                if (dropSplits) {
+                    val tok = splitRe.matchEntire(fname)?.groupValues?.get(1)?.lowercase()
+                    if (tok != null && tok in knownAbis && tok !in deviceAbisNorm) {
+                        log("↷ Split dilewati (ABI tidak cocok): $fname")
+                        continue
+                    }
+                }
+                val f = File(work, "in_${out.size}_$fname")
                 z.getInputStream(e).use { i -> f.outputStream().use { i.copyTo(it) } }
                 out += f
             }
@@ -56,31 +78,36 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
     fun describe(input: File): String {
         val work = workDir()
         val sb = StringBuilder()
-        val apks = listApks(input, work)
-        sb.append("Jumlah APK: ${apks.size}\n")
+        val apks = listApks(input, work, false)
+        sb.append("${apks.size} APK di dalam file\n")
         for (a in apks) {
             val p = Native.inspect(manifestOf(a)).split('\t')
-            if (p.size < 4) { sb.append("• ${a.name}: manifest tidak terbaca\n"); continue }
-            val abis = abisOf(a)
-            sb.append("• ${if (a === input) "APK" else a.name}\n  pkg=${p[0]}\n  minSdk=${p[1]} targetSdk=${p[2]} splitWajib=${p[3]}\n")
-            if (abis.isNotEmpty()) sb.append("  ABI=${abis.joinToString()}\n")
+            if (p.size < 7) { sb.append("• ${a.name}: manifest tidak terbaca\n"); continue }
             val min = p[1].toIntOrNull() ?: -1
-            if (min > sdk) sb.append("  ⚠ minSdk $min > Android HP (API $sdk)\n")
-            if (abis.isNotEmpty() && abis.none { it in Build.SUPPORTED_ABIS }) sb.append("  ⚠ ABI tidak cocok dengan HP\n")
+            val tgt = p[2].toIntOrNull() ?: -1
+            if (min == -1 && tgt == -1) { sb.append("• split: ${a.name}\n"); continue }
+            val abis = abisOf(a)
+            sb.append("\n📦 ${p[0]}\n   versi ${p[5]} (kode ${p[4]}) · ${p[6]} izin\n")
+            sb.append("   minSdk $min · targetSdk $tgt · split wajib: ${if (p[3] == "1") "ya" else "tidak"}\n")
+            if (abis.isNotEmpty()) sb.append("   ABI: ${abis.joinToString()}\n")
+            if (min > sdk) sb.append("   ⚠ minSdk $min lebih tinggi dari HP (API $sdk)\n")
+            if (abis.isNotEmpty() && abis.none { it in deviceAbis }) sb.append("   ⚠ ABI tidak cocok dengan HP\n")
         }
-        return sb.toString()
+        return sb.toString().trim()
     }
 
-    /** Patch manifest, align, tanda tangan V1+V2+V3. Mengembalikan APK siap install. */
+    /** Patch manifest, align, tanda tangan V1+V2+V3, lalu verifikasi. Mengembalikan APK siap install. */
     fun fix(input: File, opts: Opts): List<File> {
         val work = workDir()
-        val apks = listApks(input, work)
+        val apks = listApks(input, work, opts.dropSplits)
         val outDir = File(work, "out").apply { mkdirs() }
         val (key, cert) = loadKey()
+        lastPkg = ""
         return apks.mapIndexed { idx, apk ->
             val manifest = manifestOf(apk)
             val p = Native.inspect(manifest).split('\t')
             require(p.size >= 4) { "${apk.name}: manifest tidak terbaca" }
+            if (lastPkg.isEmpty() && p[0].isNotEmpty()) lastPkg = p[0]
             val min = p[1].toInt()
             val tgt = p[2].toInt()
             val newMin = if (opts.lowerMin && min > sdk) sdk else -1
@@ -90,8 +117,10 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
             if (newTgt >= 0) log("targetSdk $tgt → $newTgt")
             val patched = Native.patch(manifest, newMin, newTgt, true) ?: error("Gagal mem-patch manifest")
 
+            val libAbis = abisOf(apk)
+            val keep = if (opts.stripAbi && libAbis.any { it in deviceAbis }) deviceAbis else null
             val aligned = File(work, "al_$idx.apk")
-            alignRewrite(apk, aligned, patched)
+            alignRewrite(apk, aligned, patched, keep)
 
             val out = File(outDir, if (apks.size == 1) "fixed.apk" else "fixed_${idx}_${apk.name}")
             val cfg = ApkSigner.SignerConfig.Builder("ApkFixer", key, listOf(cert)).build()
@@ -100,8 +129,19 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
                 .setV1SigningEnabled(true).setV2SigningEnabled(true).setV3SigningEnabled(true)
                 .setCreatedBy("ApkFixer").build().sign()
             aligned.delete()
-            log("✔ ${out.name} (${out.length() / 1024} KB) ditandatangani V1+V2+V3")
+            log("✔ ${out.name} (${out.length() / 1024} KB) ditandatangani")
+            verify(out)
             out
+        }
+    }
+
+    private fun verify(f: File) {
+        try {
+            val r = ApkVerifier.Builder(f).build().verify()
+            if (r.isVerified) log("   verifikasi OK (v1=${r.isVerifiedUsingV1Scheme} v2=${r.isVerifiedUsingV2Scheme} v3=${r.isVerifiedUsingV3Scheme})")
+            else log("   ⚠ verifikasi gagal: " + r.errors.joinToString { it.toString() })
+        } catch (t: Throwable) {
+            log("   (verifikasi dilewati: ${t.javaClass.simpleName})")
         }
     }
 
@@ -122,13 +162,18 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
     }
 
     /** Tulis ulang ZIP: manifest baru, tanda tangan lama dibuang, resources.arsc STORED + align 4, .so STORED align 4096. */
-    private fun alignRewrite(src: File, dst: File, manifest: ByteArray) {
+    private fun alignRewrite(src: File, dst: File, manifest: ByteArray, keepAbis: Set<String>?) {
+        var dropped = 0
         ZipFile(src).use { zf ->
             val cnt = Counter(BufferedOutputStream(FileOutputStream(dst), 1 shl 16))
             ZipOutputStream(cnt).use { zos ->
                 for (e in zf.entries()) {
                     val name = e.name
                     if (e.isDirectory || isSig(name)) continue
+                    if (keepAbis != null && name.startsWith("lib/")) {
+                        val abi = name.split('/').getOrNull(1)
+                        if (abi != null && abi !in keepAbis) { dropped++; continue }
+                    }
                     val ne = ZipEntry(name)
                     if (e.time != -1L) ne.time = e.time
                     when {
@@ -170,5 +215,6 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
                 }
             }
         }
+        if (dropped > 0) log("↷ $dropped file library ABI lain dibuang")
     }
 }
