@@ -34,13 +34,14 @@ class Cloner(private val ctx: Context, private val log: (String) -> Unit) {
     private val fixer = Fixer(ctx, log)
     private val KS = "AndroidKeyStore"
 
-    data class Suggestion(val pkg: String, val label: String)
+    data class Suggestion(val pkg: String, val label: String, val verName: String)
 
     fun suggest(ai: ApplicationInfo): Suggestion {
         val pm = ctx.packageManager
         val label = pm.getApplicationLabel(ai).toString()
         val suffix = Random.nextInt(1000, 9999)
-        return Suggestion("${ai.packageName}.clone$suffix", "$label Clone")
+        val verName = try { pm.getPackageInfo(ai.packageName, 0).versionName ?: "1.0" } catch (t: Throwable) { "1.0" }
+        return Suggestion("${ai.packageName}.clone$suffix", "$label Clone", "$verName-clone")
     }
 
     /** Menyalin APK (+split) aplikasi terpasang ke satu file kerja (.apk polos atau .xapk gabungan). */
@@ -63,7 +64,14 @@ class Cloner(private val ctx: Context, private val log: (String) -> Unit) {
         return target
     }
 
-    fun clone(input: File, newPkg: String, newLabel: String): CloneResult {
+    fun clone(
+        input: File,
+        origPkg: String,
+        newPkg: String,
+        newLabel: String,
+        newVerName: String = "",
+        newVerCode: Int = -1
+    ): CloneResult {
         require(Regex("""^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$""").matches(newPkg)) {
             "Package name tidak valid: $newPkg"
         }
@@ -78,11 +86,11 @@ class Cloner(private val ctx: Context, private val log: (String) -> Unit) {
             val info = Native.inspect(manifest).split('\t')
             val isBase = info.size >= 4 && info[1].toIntOrNull() != -1
             val patched = if (isBase) {
-                Native.clonePatch(manifest, newPkg, newLabel, authSuffix)
+                Native.clonePatch(manifest, origPkg, newPkg, newLabel, newVerName, newVerCode, authSuffix)
                     ?: error("Gagal mem-patch manifest untuk kloning (${apk.name})")
             } else {
                 // split config (misalnya split per-ABI) biasanya tidak membawa <application>/package utama.
-                Native.clonePatch(manifest, null, null, authSuffix) ?: manifest
+                Native.clonePatch(manifest, origPkg, null, null, null, -1, authSuffix) ?: manifest
             }
 
             val overrides = HashMap<String, ByteArray>()

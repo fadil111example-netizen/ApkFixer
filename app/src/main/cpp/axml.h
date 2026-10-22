@@ -256,41 +256,60 @@ inline void setStringAttrByIndex(uint8_t* a, int strIndex) {
     wr<uint32_t>(a + 16, (uint32_t)strIndex);    // typedValue.data
 }
 
-// Mengubah package manifest, label aplikasi, dan authorities provider (menambah sufiks).
+constexpr uint32_t kResName = 0x01010003, kResPermission = 0x01010006;
+
+// Mengubah package manifest, label, versi, authorities provider, DAN setiap <permission>/
+// <permission-group> yang namanya diawali packagename asli (pola umum izin kustom buatan
+// AndroidX, mis. "pkg.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION") — ini mencegah
+// INSTALL_FAILED_DUPLICATE_PERMISSION saat hasil klon dipasang berdampingan dengan aslinya.
+// Setiap <uses-permission> dan atribut android:permission yang merujuk nama lama ikut diubah.
 // Mengembalikan true bila buffer dipatch (walau sebagian tidak ditemukan, itu tetap dianggap sukses).
-inline bool clonePatch(std::vector<uint8_t>& d, const std::string& newPkg, const std::string& newLabel,
+inline bool clonePatch(std::vector<uint8_t>& d, const std::string& origPkg, const std::string& newPkg,
+                        const std::string& newLabel, const std::string& newVerName, int newVerCode,
                         const std::string& authSuffix) {
     if (d.size() < 8 || rd<uint16_t>(d.data()) != kXml) return false;
 
     std::vector<std::string> toAdd;
     if (!newPkg.empty()) toAdd.push_back(newPkg);
     if (!newLabel.empty()) toAdd.push_back(newLabel);
-    // Authorities dikumpulkan dalam pass pertama (baca saja), lalu ditambahkan satu per satu di pass kedua.
+    if (!newVerName.empty()) toAdd.push_back(newVerName);
 
-    // --- Pass 1: kumpulkan nilai authorities yang perlu diubah ---
+    // --- Pass 1: baca pool + kumpulkan authorities dan nama <permission>/<permission-group> yang perlu diganti ---
     std::vector<std::string> authValues;
+    std::vector<std::pair<uint32_t, std::string>> permRenames;  // (indeks string lama, nilai baru)
     {
         std::vector<std::string> pool; std::vector<uint32_t> ids;
-        readPool(d.data(), findPool(d).poolOff, findPool(d).poolSize, pool);
+        PoolWriter pw0 = findPool(d);
+        readPool(d.data(), pw0.poolOff, pw0.poolSize, pool);
         size_t pos = rd<uint16_t>(d.data() + 2);
         while (pos + 8 <= d.size()) {
             uint16_t type = rd<uint16_t>(d.data() + pos);
             uint32_t sz = rd<uint32_t>(d.data() + pos + 4);
             if (sz < 8 || pos + sz > d.size()) break;
             if (type == kResMap) { ids.clear(); for (size_t o = pos + rd<uint16_t>(d.data()+pos+2); o + 4 <= pos + sz; o += 4) ids.push_back(rd<uint32_t>(d.data() + o)); }
-            else if (type == kStartEl && sz >= 36 && !authSuffix.empty()) {
+            else if (type == kStartEl && sz >= 36) {
                 const uint8_t* c = d.data() + pos;
                 uint32_t nameIdx = rd<uint32_t>(c + 20);
-                if (nameIdx < pool.size() && pool[nameIdx] == "provider") {
-                    uint16_t aStart = rd<uint16_t>(c + 24), aSize = rd<uint16_t>(c + 26), aCnt = rd<uint16_t>(c + 28);
-                    for (uint16_t i = 0; i < aCnt && aSize >= 20; i++) {
-                        size_t ao = 16 + (size_t)aStart + (size_t)i * aSize;
-                        if (ao + 20 > sz) break;
-                        const uint8_t* a = c + ao;
-                        uint32_t an = rd<uint32_t>(a + 4), raw = rd<uint32_t>(a + 8);
-                        uint32_t id = an < ids.size() ? ids[an] : 0;
-                        bool isAuth = id == 0x01010018 || (an < pool.size() && pool[an] == "authorities");
+                const std::string el = nameIdx < pool.size() ? pool[nameIdx] : std::string();
+                uint16_t aStart = rd<uint16_t>(c + 24), aSize = rd<uint16_t>(c + 26), aCnt = rd<uint16_t>(c + 28);
+                for (uint16_t i = 0; i < aCnt && aSize >= 20; i++) {
+                    size_t ao = 16 + (size_t)aStart + (size_t)i * aSize;
+                    if (ao + 20 > sz) break;
+                    const uint8_t* a = c + ao;
+                    uint32_t an = rd<uint32_t>(a + 4), raw = rd<uint32_t>(a + 8);
+                    uint32_t id = an < ids.size() ? ids[an] : 0;
+                    const std::string nm = an < pool.size() ? pool[an] : std::string();
+                    if (!authSuffix.empty() && el == "provider") {
+                        bool isAuth = id == 0x01010018 || nm == "authorities";
                         if (isAuth && raw != kNone && raw < pool.size()) authValues.push_back(pool[raw] + "." + authSuffix);
+                    }
+                    if (!origPkg.empty() && !newPkg.empty() && (el == "permission" || el == "permission-group")) {
+                        bool isName = id == kResName || nm == "name";
+                        if (isName && raw != kNone && raw < pool.size()) {
+                            const std::string& v = pool[raw];
+                            if (v.rfind(origPkg + ".", 0) == 0)
+                                permRenames.push_back({raw, newPkg + v.substr(origPkg.size())});
+                        }
                     }
                 }
             }
@@ -298,13 +317,26 @@ inline bool clonePatch(std::vector<uint8_t>& d, const std::string& newPkg, const
         }
     }
     for (auto& v : authValues) toAdd.push_back(v);
-    if (toAdd.empty()) return true;  // tidak ada yang perlu diubah
+    for (auto& [idx_, v] : permRenames) { (void)idx_; toAdd.push_back(v); }
+    if (toAdd.empty() && newVerCode < 0) return true;  // tidak ada yang perlu diubah
 
     int firstIdx = -1;
-    if (appendPoolStrings(d, toAdd, firstIdx) < 0) return false;
-    int pkgIdx = newPkg.empty() ? -1 : firstIdx;
-    int labelIdx = newLabel.empty() ? -1 : firstIdx + (newPkg.empty() ? 0 : 1);
-    int authBase = firstIdx + (newPkg.empty() ? 0 : 1) + (newLabel.empty() ? 0 : 1);
+    if (!toAdd.empty() && appendPoolStrings(d, toAdd, firstIdx) < 0) return false;
+    int cursor = firstIdx;
+    int pkgIdx = -1, labelIdx = -1, verNameIdx = -1, authBase = -1, permBase = -1;
+    if (!newPkg.empty()) { pkgIdx = cursor++; }
+    if (!newLabel.empty()) { labelIdx = cursor++; }
+    if (!newVerName.empty()) { verNameIdx = cursor++; }
+    if (!authValues.empty()) { authBase = cursor; cursor += (int)authValues.size(); }
+    if (!permRenames.empty()) { permBase = cursor; cursor += (int)permRenames.size(); }
+
+    // Peta: indeks string lama (nama permission) -> indeks string baru di pool.
+    std::vector<std::pair<uint32_t, uint32_t>> permMap;
+    for (size_t i = 0; i < permRenames.size(); i++) permMap.push_back({permRenames[i].first, (uint32_t)(permBase + (int)i)});
+    auto mapPerm = [&](uint32_t oldIdx) -> int {
+        for (auto& [o, n] : permMap) if (o == oldIdx) return (int)n;
+        return -1;
+    };
 
     // --- Pass 2: tulis ulang atribut ---
     std::vector<std::string> pool; std::vector<uint32_t> ids;
@@ -326,13 +358,27 @@ inline bool clonePatch(std::vector<uint8_t>& d, const std::string& newPkg, const
                 size_t ao = 16 + (size_t)aStart + (size_t)i * aSize;
                 if (ao + 20 > sz) break;
                 uint8_t* a = c + ao;
-                uint32_t an = rd<uint32_t>(a + 4);
+                uint32_t an = rd<uint32_t>(a + 4), raw = rd<uint32_t>(a + 8);
                 uint32_t id = an < ids.size() ? ids[an] : 0;
                 const std::string& nm = an < pool.size() ? pool[an] : std::string();
                 if (pkgIdx >= 0 && el == "manifest" && nm == "package") setStringAttrByIndex(a, pkgIdx);
+                if (newVerCode >= 0 && el == "manifest" && (id == kResVerCode || nm == "versionCode")) setInt(a, newVerCode);
+                if (verNameIdx >= 0 && el == "manifest" && (id == kResVerName || nm == "versionName")) setStringAttrByIndex(a, verNameIdx);
                 if (labelIdx >= 0 && el == "application" && (id == 0x01010001 || nm == "label")) setStringAttrByIndex(a, labelIdx);
                 if (!authSuffix.empty() && el == "provider" && (id == 0x01010018 || nm == "authorities") && authCursor < (int)authValues.size())
                     setStringAttrByIndex(a, authBase + authCursor++);
+                if ((el == "permission" || el == "permission-group") && (id == kResName || nm == "name") && raw != kNone) {
+                    int ni = mapPerm(raw);
+                    if (ni >= 0) setStringAttrByIndex(a, (uint32_t)ni);
+                }
+                if ((el == "uses-permission" || el == "uses-permission-sdk-23") && (id == kResName || nm == "name") && raw != kNone) {
+                    int ni = mapPerm(raw);
+                    if (ni >= 0) setStringAttrByIndex(a, (uint32_t)ni);
+                }
+                if ((id == kResPermission || nm == "permission") && raw != kNone) {
+                    int ni = mapPerm(raw);
+                    if (ni >= 0) setStringAttrByIndex(a, (uint32_t)ni);
+                }
             }
         }
         pos += sz;

@@ -386,13 +386,21 @@ class MainActivity : AppCompatActivity() {
         val view = layoutInflater.inflate(R.layout.dialog_clone, null)
         val etPkg = view.findViewById<TextInputEditText>(R.id.etPkg).apply { setText(sug.pkg) }
         val etLabel = view.findViewById<TextInputEditText>(R.id.etLabel).apply { setText(sug.label) }
+        val etVerName = view.findViewById<TextInputEditText>(R.id.etVerName).apply { setText(sug.verName) }
+        val etVerCode = view.findViewById<TextInputEditText>(R.id.etVerCode)
+        val advBox = view.findViewById<View>(R.id.advancedBox)
+        view.findViewById<MaterialButton>(R.id.btnAdvanced).setOnClickListener {
+            advBox.visibility = if (advBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
         MaterialAlertDialogBuilder(this)
             .setTitle("Clone " + pm_label(ai))
             .setView(view)
             .setPositiveButton("Clone & Install") { _, _ ->
                 val pkg = etPkg.text?.toString()?.trim().orEmpty()
                 val label = etLabel.text?.toString()?.trim().orEmpty()
-                runClone(cloner, ai, pkg, label)
+                val verName = etVerName.text?.toString()?.trim().orEmpty()
+                val verCode = etVerCode.text?.toString()?.trim()?.toIntOrNull() ?: -1
+                runClone(cloner, ai, pkg, label, verName, verCode)
             }
             .setNegativeButton("Batal", null)
             .show()
@@ -400,13 +408,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun pm_label(ai: ApplicationInfo): String = packageManager.getApplicationLabel(ai).toString()
 
-    private fun runClone(cloner: Cloner, ai: ApplicationInfo, pkg: String, label: String) {
+    private fun runClone(cloner: Cloner, ai: ApplicationInfo, pkg: String, label: String, verName: String, verCode: Int) {
         setBusy(true)
         log("— kloning ${ai.packageName} → $pkg —")
         io.execute {
             try {
                 val src = cloner.extractInstalled(ai)
-                val res = cloner.clone(src, pkg, label)
+                val res = cloner.clone(src, ai.packageName, pkg, label, verName, verCode)
                 lastPkg = res.newPackage
                 lastVer = "clone"
                 installApks(res.apks)

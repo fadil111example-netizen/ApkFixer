@@ -39,4 +39,53 @@
         android:layout_marginTop="10dp"
         android:text="Nilai sudah diisi otomatis. Ubah bila ingin menentukan sendiri."
         android:textSize="12sp" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnAdvanced"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:paddingStart="0dp"
+        android:text="Opsi lanjutan ▾" />
+
+    <LinearLayout
+        android:id="@+id/advancedBox"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Nama versi (versionName)">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/etVerName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Kode versi (versionCode, angka — kosongkan jika tidak diubah)">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/etVerCode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="number" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Manifest biner, izin kustom (android:permission), dan authorities provider diubah otomatis supaya tidak bentrok dengan aplikasi asli — tidak perlu diatur manual."
+            android:textSize="12sp" />
+    </LinearLayout>
 </LinearLayout>

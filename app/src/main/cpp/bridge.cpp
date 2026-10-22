@@ -45,7 +45,8 @@ JNIEXPORT jstring JNICALL Java_com_fadil_apkfixer_Native_sha256(JNIEnv* env, job
 }
 
 JNIEXPORT jbyteArray JNICALL Java_com_fadil_apkfixer_Native_clonePatch(JNIEnv* env, jobject, jbyteArray arr,
-                                                                       jstring newPkg, jstring newLabel, jstring authSuffix) {
+                                                                       jstring origPkg, jstring newPkg, jstring newLabel,
+                                                                       jstring newVerName, jint newVerCode, jstring authSuffix) {
     auto buf = toVec(env, arr);
     auto toStr = [&](jstring js) -> std::string {
         if (!js) return "";
@@ -54,7 +55,8 @@ JNIEXPORT jbyteArray JNICALL Java_com_fadil_apkfixer_Native_clonePatch(JNIEnv* e
         env->ReleaseStringUTFChars(js, p);
         return s;
     };
-    if (!axml::clonePatch(buf, toStr(newPkg), toStr(newLabel), toStr(authSuffix))) return nullptr;
+    if (!axml::clonePatch(buf, toStr(origPkg), toStr(newPkg), toStr(newLabel), toStr(newVerName), (int)newVerCode, toStr(authSuffix)))
+        return nullptr;
     jbyteArray out = env->NewByteArray((jsize)buf.size());
     env->SetByteArrayRegion(out, 0, (jsize)buf.size(), reinterpret_cast<const jbyte*>(buf.data()));
     return out;
