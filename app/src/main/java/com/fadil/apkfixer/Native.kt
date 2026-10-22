@@ -8,4 +8,7 @@ object Native {
 
     /** Salinan manifest yang sudah dipatch; nilai < 0 berarti tidak diubah. */
     external fun patch(manifest: ByteArray, minSdk: Int, targetSdk: Int, clearSplit: Boolean): ByteArray?
+
+    /** SHA-256 (hex) sebuah file, dihitung di C++. "" bila file tidak terbaca. */
+    external fun sha256(path: String): String
 }

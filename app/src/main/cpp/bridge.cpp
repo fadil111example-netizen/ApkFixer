@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "axml.h"
+#include "sha256.h"
 
 static std::vector<uint8_t> toVec(JNIEnv* env, jbyteArray arr) {
     jsize n = env->GetArrayLength(arr);
@@ -33,6 +34,14 @@ JNIEXPORT jbyteArray JNICALL Java_com_fadil_apkfixer_Native_patch(JNIEnv* env, j
     jbyteArray out = env->NewByteArray((jsize)buf.size());
     env->SetByteArrayRegion(out, 0, (jsize)buf.size(), reinterpret_cast<const jbyte*>(buf.data()));
     return out;
+}
+
+JNIEXPORT jstring JNICALL Java_com_fadil_apkfixer_Native_sha256(JNIEnv* env, jobject, jstring path) {
+    const char* p = env->GetStringUTFChars(path, nullptr);
+    std::string hex;
+    bool ok = sha::file(p, hex);
+    env->ReleaseStringUTFChars(path, p);
+    return env->NewStringUTF(ok ? hex.c_str() : "");
 }
 
 }  // extern "C"

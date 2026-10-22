@@ -36,6 +36,8 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
     /** Paket aplikasi utama dari fix() terakhir (untuk tombol uninstall). */
     var lastPkg: String = ""
         private set
+    var lastVer: String = ""
+        private set
 
     private fun workDir(): File = File(ctx.cacheDir, "work").apply { deleteRecursively(); mkdirs() }
 
@@ -80,6 +82,8 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
         val sb = StringBuilder()
         val apks = listApks(input, work, false)
         sb.append("${apks.size} APK di dalam file\n")
+        val sha = Native.sha256(input.path)
+        if (sha.isNotEmpty()) sb.append("SHA-256 ${sha.take(16)}…\n")
         for (a in apks) {
             val p = Native.inspect(manifestOf(a)).split('\t')
             if (p.size < 7) { sb.append("• ${a.name}: manifest tidak terbaca\n"); continue }
@@ -103,11 +107,12 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
         val outDir = File(work, "out").apply { mkdirs() }
         val (key, cert) = loadKey()
         lastPkg = ""
+        lastVer = ""
         return apks.mapIndexed { idx, apk ->
             val manifest = manifestOf(apk)
             val p = Native.inspect(manifest).split('\t')
             require(p.size >= 4) { "${apk.name}: manifest tidak terbaca" }
-            if (lastPkg.isEmpty() && p[0].isNotEmpty()) lastPkg = p[0]
+            if (lastPkg.isEmpty() && p[0].isNotEmpty()) { lastPkg = p[0]; lastVer = p.getOrElse(5) { "" } }
             val min = p[1].toInt()
             val tgt = p[2].toInt()
             val newMin = if (opts.lowerMin && min > sdk) sdk else -1
