@@ -152,16 +152,18 @@ class Cloner(private val ctx: Context, private val log: (String) -> Unit) {
         return out
     }
 
-    private fun iconEntryName(apk: File): String? = try {
-        val pm = ctx.packageManager
-        val info = pm.getPackageArchiveInfo(apk.path, 0) ?: return null
-        val resId = info.applicationInfo?.icon ?: 0
-        if (resId == 0) return null
-        info.applicationInfo!!.sourceDir = apk.path
-        info.applicationInfo!!.publicSourceDir = apk.path
-        val res = pm.getResourcesForApplication(info.applicationInfo!!)
-        res.getResourceEntryName(resId)
-    } catch (t: Throwable) { null }
+    private fun iconEntryName(apk: File): String? {
+        return try {
+            val pm = ctx.packageManager
+            val info = pm.getPackageArchiveInfo(apk.path, 0) ?: return null
+            val resId = info.applicationInfo?.icon ?: 0
+            if (resId == 0) return null
+            info.applicationInfo!!.sourceDir = apk.path
+            info.applicationInfo!!.publicSourceDir = apk.path
+            val res = pm.getResourcesForApplication(info.applicationInfo!!)
+            res.getResourceEntryName(resId)
+        } catch (t: Throwable) { null }
+    }
 
     /** Menggambar lingkaran oranye dengan huruf "C" di sudut kanan-bawah ikon, menandai ini salinan klon. */
     private fun addBadge(src: Bitmap): Bitmap {
