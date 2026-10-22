@@ -128,4 +128,217 @@ inline bool process(uint8_t* d, size_t n, int newMin, int newTarget, bool clearS
     return true;
 }
 
+
+// ===== Dukungan tulis: memperbesar string pool dan mengganti nilai atribut string =====
+
+inline void appendU32(std::vector<uint8_t>& v, uint32_t x) {
+    v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8));
+    v.push_back((uint8_t)(x >> 16)); v.push_back((uint8_t)(x >> 24));
+}
+inline void appendU16(std::vector<uint8_t>& v, uint16_t x) {
+    v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8));
+}
+
+// Encode satu string baru ke format pool (UTF-8 atau UTF-16 sesuai flag pool asli).
+inline void encodeStr(std::vector<uint8_t>& data, const std::string& s, bool utf8) {
+    if (utf8) {
+        uint32_t chars = (uint32_t)s.size();  // ASCII-only, chars == bytes
+        auto putLen = [&](uint32_t l) {
+            if (l < 0x80) data.push_back((uint8_t)l);
+            else { data.push_back((uint8_t)(0x80 | (l >> 8))); data.push_back((uint8_t)l); }
+        };
+        putLen(chars);
+        putLen(chars);
+        data.insert(data.end(), s.begin(), s.end());
+        data.push_back(0);
+    } else {
+        uint32_t chars = (uint32_t)s.size();
+        if (chars < 0x8000) appendU16(data, (uint16_t)chars);
+        else { appendU16(data, (uint16_t)(0x8000 | (chars >> 16))); appendU16(data, (uint16_t)chars); }
+        for (char c : s) appendU16(data, (uint16_t)(uint8_t)c);
+        appendU16(data, 0);
+    }
+}
+
+// Menambah satu atau lebih string baru ke string pool AXML dan mengembalikan indeksnya.
+// Mengubah ukuran seluruh buffer karena pool ditulis ulang total (layout: header, offset[], data[]).
+// Hanya mendukung pool tanpa style span (styleCount == 0), yang berlaku untuk manifest hasil AAPT/AAPT2.
+struct PoolWriter {
+    size_t poolOff = 0, poolSize = 0;
+    uint32_t count = 0, flags = 0;
+    bool ok = false;
+};
+
+inline PoolWriter findPool(const std::vector<uint8_t>& d) {
+    PoolWriter pw;
+    if (d.size() < 8 || rd<uint16_t>(d.data()) != kXml) return pw;
+    size_t pos = rd<uint16_t>(d.data() + 2);
+    while (pos + 8 <= d.size()) {
+        uint16_t type = rd<uint16_t>(d.data() + pos);
+        uint32_t sz = rd<uint32_t>(d.data() + pos + 4);
+        if (sz < 8 || pos + sz > d.size()) break;
+        if (type == kPool) {
+            uint32_t styleCount = rd<uint32_t>(d.data() + pos + 12);
+            if (styleCount == 0) {
+                pw.poolOff = pos; pw.poolSize = sz;
+                pw.count = rd<uint32_t>(d.data() + pos + 8);
+                pw.flags = rd<uint32_t>(d.data() + pos + 16);
+                pw.ok = true;
+            }
+            return pw;
+        }
+        pos += sz;
+    }
+    return pw;
+}
+
+// newStrings ditambahkan ke akhir pool; mengembalikan indeks string pertama yang baru (berurutan).
+inline int appendPoolStrings(std::vector<uint8_t>& d, const std::vector<std::string>& newStrings, int& firstIndexOut) {
+    PoolWriter pw = findPool(d);
+    if (!pw.ok || newStrings.empty()) return -1;
+    const uint8_t* base = d.data() + pw.poolOff;
+    bool utf8 = (pw.flags & 0x100) != 0;
+    uint32_t hs = rd<uint16_t>(base + 2);
+    uint32_t oldCount = pw.count;
+    uint32_t stringsStart = rd<uint32_t>(base + 20);
+
+    // Kumpulkan offset lama (relatif ke stringsStart) dan data string lama mentah.
+    std::vector<uint32_t> oldOffsets(oldCount);
+    for (uint32_t i = 0; i < oldCount; i++) oldOffsets[i] = rd<uint32_t>(base + hs + (size_t)i * 4);
+    size_t dataStart = pw.poolOff + stringsStart;
+    size_t dataLen = pw.poolSize - stringsStart;
+    std::vector<uint8_t> oldData(d.begin() + dataStart, d.begin() + dataStart + dataLen);
+
+    // Encode string baru.
+    std::vector<uint8_t> newData;
+    std::vector<uint32_t> newOffsets;
+    for (auto& s : newStrings) { newOffsets.push_back((uint32_t)(oldData.size() + newData.size())); encodeStr(newData, s, utf8); }
+
+    uint32_t newCount = oldCount + (uint32_t)newStrings.size();
+    std::vector<uint8_t> chunk;
+    appendU16(chunk, kPool); appendU16(chunk, (uint16_t)hs);
+    size_t sizePos = chunk.size(); appendU32(chunk, 0);  // diisi belakangan
+    appendU32(chunk, newCount);
+    appendU32(chunk, 0);               // styleCount tetap 0
+    appendU32(chunk, pw.flags);
+    size_t stringsStartPos = chunk.size(); appendU32(chunk, 0);  // diisi belakangan
+    appendU32(chunk, 0);               // stylesStart = 0 (tidak ada style)
+    for (size_t i = chunk.size(); i < hs; i++) chunk.push_back(0);  // jaga-jaga jika header lebih besar
+
+    for (uint32_t off : oldOffsets) appendU32(chunk, off);
+    for (uint32_t off : newOffsets) appendU32(chunk, off);
+
+    uint32_t newStringsStart = (uint32_t)chunk.size();
+    chunk.insert(chunk.end(), oldData.begin(), oldData.end());
+    chunk.insert(chunk.end(), newData.begin(), newData.end());
+    // Pool chunk harus kelipatan 4 byte.
+    while (chunk.size() % 4 != 0) chunk.push_back(0);
+
+    wr<uint32_t>(chunk.data() + sizePos, (uint32_t)chunk.size());
+    wr<uint32_t>(chunk.data() + stringsStartPos, newStringsStart);
+
+    long delta = (long)chunk.size() - (long)pw.poolSize;
+    d.erase(d.begin() + pw.poolOff, d.begin() + pw.poolOff + pw.poolSize);
+    d.insert(d.begin() + pw.poolOff, chunk.begin(), chunk.end());
+
+    uint32_t totalSize = rd<uint32_t>(d.data() + 4);
+    wr<uint32_t>(d.data() + 4, (uint32_t)((long)totalSize + delta));
+
+    firstIndexOut = (int)oldCount;
+    return firstIndexOut;
+}
+
+inline void setStringAttrByIndex(uint8_t* a, int strIndex) {
+    wr<uint32_t>(a + 8, (uint32_t)strIndex);   // rawValue
+    wr<uint16_t>(a + 12, 8);                    // typedValue.size
+    a[14] = 0;
+    a[15] = 0x03;                                // TYPE_STRING
+    wr<uint32_t>(a + 16, (uint32_t)strIndex);    // typedValue.data
+}
+
+// Mengubah package manifest, label aplikasi, dan authorities provider (menambah sufiks).
+// Mengembalikan true bila buffer dipatch (walau sebagian tidak ditemukan, itu tetap dianggap sukses).
+inline bool clonePatch(std::vector<uint8_t>& d, const std::string& newPkg, const std::string& newLabel,
+                        const std::string& authSuffix) {
+    if (d.size() < 8 || rd<uint16_t>(d.data()) != kXml) return false;
+
+    std::vector<std::string> toAdd;
+    if (!newPkg.empty()) toAdd.push_back(newPkg);
+    if (!newLabel.empty()) toAdd.push_back(newLabel);
+    // Authorities dikumpulkan dalam pass pertama (baca saja), lalu ditambahkan satu per satu di pass kedua.
+
+    // --- Pass 1: kumpulkan nilai authorities yang perlu diubah ---
+    std::vector<std::string> authValues;
+    {
+        std::vector<std::string> pool; std::vector<uint32_t> ids;
+        readPool(d.data(), findPool(d).poolOff, findPool(d).poolSize, pool);
+        size_t pos = rd<uint16_t>(d.data() + 2);
+        while (pos + 8 <= d.size()) {
+            uint16_t type = rd<uint16_t>(d.data() + pos);
+            uint32_t sz = rd<uint32_t>(d.data() + pos + 4);
+            if (sz < 8 || pos + sz > d.size()) break;
+            if (type == kResMap) { ids.clear(); for (size_t o = pos + rd<uint16_t>(d.data()+pos+2); o + 4 <= pos + sz; o += 4) ids.push_back(rd<uint32_t>(d.data() + o)); }
+            else if (type == kStartEl && sz >= 36 && !authSuffix.empty()) {
+                const uint8_t* c = d.data() + pos;
+                uint32_t nameIdx = rd<uint32_t>(c + 20);
+                if (nameIdx < pool.size() && pool[nameIdx] == "provider") {
+                    uint16_t aStart = rd<uint16_t>(c + 24), aSize = rd<uint16_t>(c + 26), aCnt = rd<uint16_t>(c + 28);
+                    for (uint16_t i = 0; i < aCnt && aSize >= 20; i++) {
+                        size_t ao = 16 + (size_t)aStart + (size_t)i * aSize;
+                        if (ao + 20 > sz) break;
+                        const uint8_t* a = c + ao;
+                        uint32_t an = rd<uint32_t>(a + 4), raw = rd<uint32_t>(a + 8);
+                        uint32_t id = an < ids.size() ? ids[an] : 0;
+                        bool isAuth = id == 0x01010018 || (an < pool.size() && pool[an] == "authorities");
+                        if (isAuth && raw != kNone && raw < pool.size()) authValues.push_back(pool[raw] + "." + authSuffix);
+                    }
+                }
+            }
+            pos += sz;
+        }
+    }
+    for (auto& v : authValues) toAdd.push_back(v);
+    if (toAdd.empty()) return true;  // tidak ada yang perlu diubah
+
+    int firstIdx = -1;
+    if (appendPoolStrings(d, toAdd, firstIdx) < 0) return false;
+    int pkgIdx = newPkg.empty() ? -1 : firstIdx;
+    int labelIdx = newLabel.empty() ? -1 : firstIdx + (newPkg.empty() ? 0 : 1);
+    int authBase = firstIdx + (newPkg.empty() ? 0 : 1) + (newLabel.empty() ? 0 : 1);
+
+    // --- Pass 2: tulis ulang atribut ---
+    std::vector<std::string> pool; std::vector<uint32_t> ids;
+    PoolWriter pw = findPool(d);
+    readPool(d.data(), pw.poolOff, pw.poolSize, pool);
+    size_t pos = rd<uint16_t>(d.data() + 2);
+    int authCursor = 0;
+    while (pos + 8 <= d.size()) {
+        uint16_t type = rd<uint16_t>(d.data() + pos);
+        uint32_t sz = rd<uint32_t>(d.data() + pos + 4);
+        if (sz < 8 || pos + sz > d.size()) break;
+        if (type == kResMap) { ids.clear(); for (size_t o = pos + rd<uint16_t>(d.data()+pos+2); o + 4 <= pos + sz; o += 4) ids.push_back(rd<uint32_t>(d.data() + o)); }
+        else if (type == kStartEl && sz >= 36) {
+            uint8_t* c = d.data() + pos;
+            uint32_t nameIdx = rd<uint32_t>(c + 20);
+            const std::string& el = nameIdx < pool.size() ? pool[nameIdx] : std::string();
+            uint16_t aStart = rd<uint16_t>(c + 24), aSize = rd<uint16_t>(c + 26), aCnt = rd<uint16_t>(c + 28);
+            for (uint16_t i = 0; i < aCnt && aSize >= 20; i++) {
+                size_t ao = 16 + (size_t)aStart + (size_t)i * aSize;
+                if (ao + 20 > sz) break;
+                uint8_t* a = c + ao;
+                uint32_t an = rd<uint32_t>(a + 4);
+                uint32_t id = an < ids.size() ? ids[an] : 0;
+                const std::string& nm = an < pool.size() ? pool[an] : std::string();
+                if (pkgIdx >= 0 && el == "manifest" && nm == "package") setStringAttrByIndex(a, pkgIdx);
+                if (labelIdx >= 0 && el == "application" && (id == 0x01010001 || nm == "label")) setStringAttrByIndex(a, labelIdx);
+                if (!authSuffix.empty() && el == "provider" && (id == 0x01010018 || nm == "authorities") && authCursor < (int)authValues.size())
+                    setStringAttrByIndex(a, authBase + authCursor++);
+            }
+        }
+        pos += sz;
+    }
+    return true;
+}
+
 }  // namespace axml
+

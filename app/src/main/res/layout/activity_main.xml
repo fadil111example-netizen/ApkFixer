@@ -121,6 +121,15 @@
                         android:text="Ambil APK dari aplikasi terpasang"
                         app:cornerRadius="16dp" />
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnClone"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:minHeight="52dp"
+                        android:text="🧬 Clone aplikasi terpasang"
+                        app:cornerRadius="16dp" />
+
                     <TextView
                         android:id="@+id/tvInfo"
                         android:layout_width="match_parent"

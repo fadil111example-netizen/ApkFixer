@@ -26,9 +26,9 @@ data class Opts(
     val dropSplits: Boolean
 )
 
-class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
+class Fixer(internal val ctx: Context, internal val log: (String) -> Unit) {
     private val sdk = Build.VERSION.SDK_INT
-    private val deviceAbis: Set<String> = Build.SUPPORTED_ABIS.toSet()
+    internal val deviceAbis: Set<String> = Build.SUPPORTED_ABIS.toSet()
     private val deviceAbisNorm: Set<String> = deviceAbis.map { it.replace('-', '_') }.toSet()
     private val knownAbis = setOf("arm64_v8a", "armeabi_v7a", "armeabi", "x86", "x86_64", "mips", "mips64", "riscv64")
     private val splitRe = Regex("""(?:split_)?config\.([a-z0-9_]+)\.apk""", RegexOption.IGNORE_CASE)
@@ -39,10 +39,10 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
     var lastVer: String = ""
         private set
 
-    private fun workDir(): File = File(ctx.cacheDir, "work").apply { deleteRecursively(); mkdirs() }
+    internal fun workDir(): File = File(ctx.cacheDir, "work").apply { deleteRecursively(); mkdirs() }
 
     /** APK polos -> dirinya sendiri; XAPK/APKS/APKM -> semua .apk di dalamnya diekstrak. */
-    private fun listApks(input: File, work: File, dropSplits: Boolean): List<File> {
+    internal fun listApks(input: File, work: File, dropSplits: Boolean): List<File> {
         ZipFile(input).use { z ->
             if (z.getEntry("AndroidManifest.xml") != null) return listOf(input)
             val out = ArrayList<File>()
@@ -65,13 +65,13 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
         }
     }
 
-    private fun manifestOf(apk: File): ByteArray =
+    internal fun manifestOf(apk: File): ByteArray =
         ZipFile(apk).use { z ->
             val e = z.getEntry("AndroidManifest.xml") ?: error("${apk.name}: tidak ada AndroidManifest.xml")
             z.getInputStream(e).readBytes()
         }
 
-    private fun abisOf(apk: File): Set<String> =
+    internal fun abisOf(apk: File): Set<String> =
         ZipFile(apk).use { z ->
             z.entries().asSequence().map { it.name }.filter { it.startsWith("lib/") }
                 .mapNotNull { it.split('/').getOrNull(1) }.toSortedSet()
@@ -150,28 +150,33 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
         }
     }
 
-    private fun loadKey(): Pair<PrivateKey, X509Certificate> {
+    internal fun loadKey(): Pair<PrivateKey, X509Certificate> {
         val k = ctx.assets.open("key.pk8").use { it.readBytes() }
         val key = KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(k))
         val cert = ctx.assets.open("cert.der").use { CertificateFactory.getInstance("X.509").generateCertificate(it) } as X509Certificate
         return key to cert
     }
 
-    private fun isSig(n: String) = n.startsWith("META-INF/") &&
+    internal fun isSig(n: String) = n.startsWith("META-INF/") &&
         (n == "META-INF/MANIFEST.MF" || n.endsWith(".SF") || n.endsWith(".RSA") || n.endsWith(".DSA") || n.endsWith(".EC"))
 
-    private class Counter(o: OutputStream) : FilterOutputStream(o) {
+    internal class Counter(o: OutputStream) : FilterOutputStream(o) {
         var n = 0L
         override fun write(b: Int) { out.write(b); n++ }
         override fun write(b: ByteArray, off: Int, len: Int) { out.write(b, off, len); n += len }
     }
 
-    /** Tulis ulang ZIP: manifest baru, tanda tangan lama dibuang, resources.arsc STORED + align 4, .so STORED align 4096. */
-    private fun alignRewrite(src: File, dst: File, manifest: ByteArray, keepAbis: Set<String>?) {
+    /** Tulis ulang ZIP: manifest baru + override lain, tanda tangan lama dibuang,
+     *  resources.arsc STORED + align 4, .so STORED align 4096. */
+    internal fun alignRewrite(
+        src: File, dst: File, manifest: ByteArray, keepAbis: Set<String>?,
+        overrides: Map<String, ByteArray> = emptyMap()
+    ) {
         var dropped = 0
         ZipFile(src).use { zf ->
             val cnt = Counter(BufferedOutputStream(FileOutputStream(dst), 1 shl 16))
             ZipOutputStream(cnt).use { zos ->
+                val written = HashSet<String>()
                 for (e in zf.entries()) {
                     val name = e.name
                     if (e.isDirectory || isSig(name)) continue
@@ -179,12 +184,17 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
                         val abi = name.split('/').getOrNull(1)
                         if (abi != null && abi !in keepAbis) { dropped++; continue }
                     }
+                    written += name
                     val ne = ZipEntry(name)
                     if (e.time != -1L) ne.time = e.time
                     when {
                         name == "AndroidManifest.xml" -> {
                             ne.method = ZipEntry.DEFLATED
                             zos.putNextEntry(ne); zos.write(manifest)
+                        }
+                        overrides.containsKey(name) -> {
+                            ne.method = ZipEntry.DEFLATED
+                            zos.putNextEntry(ne); zos.write(overrides.getValue(name))
                         }
                         e.method == ZipEntry.STORED || name == "resources.arsc" -> {
                             var data: ByteArray? = null
@@ -217,6 +227,11 @@ class Fixer(private val ctx: Context, private val log: (String) -> Unit) {
                         }
                     }
                     zos.closeEntry()
+                }
+                for ((name, bytes) in overrides) {
+                    if (name in written) continue
+                    val ne = ZipEntry(name); ne.method = ZipEntry.DEFLATED
+                    zos.putNextEntry(ne); zos.write(bytes); zos.closeEntry()
                 }
             }
         }

@@ -22,6 +22,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -59,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swSplit: MaterialSwitch
     private lateinit var btnPick: MaterialButton
     private lateinit var btnInstalled: MaterialButton
+    private lateinit var btnClone: MaterialButton
     private lateinit var btnInstall: MaterialButton
     private lateinit var btnSave: MaterialButton
     private lateinit var progress: LinearProgressIndicator
@@ -107,6 +109,7 @@ class MainActivity : AppCompatActivity() {
         swSplit = findViewById(R.id.swSplit)
         btnPick = findViewById(R.id.btnPick)
         btnInstalled = findViewById(R.id.btnInstalled)
+        btnClone = findViewById(R.id.btnClone)
         btnInstall = findViewById(R.id.btnInstall)
         btnSave = findViewById(R.id.btnSave)
         progress = findViewById(R.id.progress)
@@ -122,6 +125,7 @@ class MainActivity : AppCompatActivity() {
 
         btnPick.setOnClickListener { picker.launch(arrayOf("*/*")) }
         btnInstalled.setOnClickListener { pickInstalled() }
+        btnClone.setOnClickListener { pickForClone() }
         btnInstall.setOnClickListener { run(true) }
         btnSave.setOnClickListener { run(false) }
         findViewById<MaterialButton>(R.id.btnCopy).setOnClickListener {
@@ -174,6 +178,7 @@ class MainActivity : AppCompatActivity() {
         progress.visibility = if (b) View.VISIBLE else View.GONE
         btnPick.isEnabled = !b
         btnInstalled.isEnabled = !b
+        btnClone.isEnabled = !b
         btnInstall.isEnabled = !b && picked != null
         btnSave.isEnabled = !b && picked != null
     }
@@ -351,6 +356,66 @@ class MainActivity : AppCompatActivity() {
             s.commit(pending.intentSender)
         }
         log("Sesi install dikirim, menunggu sistem…")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun pickForClone() {
+        setBusy(true)
+        io.execute {
+            val pm = packageManager
+            val apps = pm.getInstalledApplications(0)
+                .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 && it.packageName != packageName }
+                .map { it to pm.getApplicationLabel(it).toString() }
+                .sortedBy { it.second.lowercase() }
+            setBusy(false)
+            runOnUiThread {
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Clone aplikasi mana? (${apps.size})")
+                    .setItems(apps.map { "${it.second}\n${it.first.packageName}" }.toTypedArray()) { _, i ->
+                        confirmClone(apps[i].first)
+                    }
+                    .setNegativeButton("Batal", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun confirmClone(ai: ApplicationInfo) {
+        val cloner = Cloner(this, this::log)
+        val sug = cloner.suggest(ai)
+        val view = layoutInflater.inflate(R.layout.dialog_clone, null)
+        val etPkg = view.findViewById<TextInputEditText>(R.id.etPkg).apply { setText(sug.pkg) }
+        val etLabel = view.findViewById<TextInputEditText>(R.id.etLabel).apply { setText(sug.label) }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Clone " + pm_label(ai))
+            .setView(view)
+            .setPositiveButton("Clone & Install") { _, _ ->
+                val pkg = etPkg.text?.toString()?.trim().orEmpty()
+                val label = etLabel.text?.toString()?.trim().orEmpty()
+                runClone(cloner, ai, pkg, label)
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
+    private fun pm_label(ai: ApplicationInfo): String = packageManager.getApplicationLabel(ai).toString()
+
+    private fun runClone(cloner: Cloner, ai: ApplicationInfo, pkg: String, label: String) {
+        setBusy(true)
+        log("— kloning ${ai.packageName} → $pkg —")
+        io.execute {
+            try {
+                val src = cloner.extractInstalled(ai)
+                val res = cloner.clone(src, pkg, label)
+                lastPkg = res.newPackage
+                lastVer = "clone"
+                installApks(res.apks)
+                addHistory("Clone dari ${ai.packageName}")
+            } catch (e: Throwable) {
+                log("Error kloning: ${e.message ?: e.javaClass.simpleName}")
+                setBusy(false)
+            }
+        }
     }
 
     private fun saveToDownloads(f: File, name: String, mime: String) {
